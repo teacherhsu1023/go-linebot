@@ -27,6 +27,7 @@ from logger import logger
 
 from handlers.go_engine import GoBoard
 from handlers.board_visualizer import BoardVisualizer
+from handlers import sai_handler
 
 # Initialize LINE Bot API v3
 configuration = Configuration(access_token=config["line"]["channel_access_token"])
@@ -1884,8 +1885,15 @@ async def handle_text_message(event: Dict[str, Any]):
     source = event.get("source", {})
     text = message.get("text", "").strip()
 
+    # 佐為聊天：「@佐為 聊天內容」（1 對 1 聊天要有這個前綴；群組則沿用下方的 mention 判斷）
+    addressed_to_sai = False
+    sai_match = re.match(rf"^@{re.escape(sai_handler.SAI_TRIGGER_NAME)}\s+(.+)$", text)
+    if sai_match:
+        text = sai_match.group(1).strip()
+        addressed_to_sai = True
+
     # In group/room, only process mention messages
-    if source.get("type") in ["group", "room"]:
+    if source.get("type") in ["group", "room"] and not addressed_to_sai:
         # First, check if text starts with "@{bot_display_name}" (text mention for desktop LINE)
         bot_display_name = await get_bot_display_name()
         text_mention_matched = False
@@ -2176,6 +2184,31 @@ async def handle_text_message(event: Dict[str, Any]):
         # Handle board coordinate input
         await handle_board_move(target_id, reply_token, user_text_upper, source)
         return
+
+    # 其餘沒有對應指令的訊息，當作跟佐為聊天
+    if addressed_to_sai:
+        await handle_sai_chat(reply_token, text)
+
+
+async def handle_sai_chat(reply_token: Optional[str], text: str):
+    """Reply to a chat message with one of Sai's quote pictures (chosen by Jev)"""
+    try:
+        urls = await sai_handler.get_sai_reply_images(text)
+        if urls is None:
+            return
+        original_url, preview_url = urls
+        request = ReplyMessageRequest(
+            reply_token=reply_token,
+            messages=[
+                ImageMessage(
+                    original_content_url=original_url,
+                    preview_image_url=preview_url,
+                )
+            ],
+        )
+        await asyncio.to_thread(line_bot_api.reply_message, request)
+    except Exception as error:
+        logger.error(f"Error handling sai chat: {error}", exc_info=True)
 
 
 async def handle_file_message(event: Dict[str, Any]):

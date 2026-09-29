@@ -154,6 +154,8 @@ gcloud config get-value project
 
 2. **OPENAI_API_KEY** - OpenAI API Key
 
+3. **TYPESAFE_API_KEY** - TypeSafe（Jev）API Key，佐為聊天功能使用（本機測試時填入 `.env` 即可）
+
 **可選環境變數：**
 
 請根據 GCP 服務中申請的名稱修改 `gcp_linebot/scripts/deploy.sh` 檔案中的各項環境變數預設值
@@ -198,6 +200,17 @@ PORT=3000
 ```
 
 ## 功能說明
+
+### 佐為聊天功能
+
+輸入「@佐為 聊天內容」，機器人會請 [TypeSafe Jev](https://docs.typesafe.ai/api) 從 `gcp_linebot/assets/sai/` 的台詞圖片中挑出最適合的一句，並回覆該張圖片。
+
+- 圖片檔名（不含副檔名）就是台詞；同一句有多張圖時，命名為 `台詞 (2).png`，回覆時隨機挑一張
+- `assets/sai/sai_hints.json` 為每句台詞補充「適合回答什麼問題」，這是 Jev 判斷準不準的關鍵
+- 新增圖片後，執行 `python scripts/sync_sai_hints.py`，再到 `sai_hints.json` 補上新台詞的說明，不需要改程式
+- 不經過 LINE 測試判斷結果：`python scripts/sai_check.py "你第一手棋都下在哪裡"`
+- 信心門檻、含糊帶過的台詞等設定集中在 `handlers/sai_handler.py` 最上方
+- 需要環境變數 `TYPESAFE_API_KEY`
 
 ### 形勢判斷功能
 
