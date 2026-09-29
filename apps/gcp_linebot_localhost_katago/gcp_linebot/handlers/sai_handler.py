@@ -160,7 +160,8 @@ def build_jev_request(user_text: str, catalog: Dict[str, SaiLine]) -> dict:
 
 async def ask_jev(user_text: str, catalog: Dict[str, SaiLine]) -> Optional[dict]:
     """呼叫 Jev，回傳 choice 答案（含 choice / probabilities / confidence）。失敗回傳 None。"""
-    api_key = os.getenv("TYPESAFE_API_KEY")
+    # Secret Manager / .env 的值常帶著結尾換行，放進 HTTP 標頭會被拒絕
+    api_key = (os.getenv("TYPESAFE_API_KEY") or "").strip().strip("\"'")
     if not api_key:
         logger.error("TYPESAFE_API_KEY 未設定，無法使用佐為聊天")
         return None
