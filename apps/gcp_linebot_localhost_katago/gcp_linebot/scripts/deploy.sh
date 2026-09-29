@@ -62,7 +62,7 @@ if [ -z "$GCS_BUCKET_NAME" ]; then
 fi
 
 # 準備 Secrets Manager
-SECRETS_ARG="--update-secrets=LINE_CHANNEL_ACCESS_TOKEN=LINE_CHANNEL_ACCESS_TOKEN:latest,OPENAI_API_KEY=OPENAI_API_KEY:latest"
+SECRETS_ARG="--update-secrets=LINE_CHANNEL_ACCESS_TOKEN=LINE_CHANNEL_ACCESS_TOKEN:latest,OPENAI_API_KEY=OPENAI_API_KEY:latest,TYPESAFE_API_KEY=TYPESAFE_API_KEY:latest"
 
 # 準備 Cloud Run 環境變數
 # 包含應用啟動所需的所有環境變數

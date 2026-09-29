@@ -1946,6 +1946,10 @@ async def handle_text_message(event: Dict[str, Any]):
 
             text = clean_text.strip()
 
+    # 群組裡走到這裡代表訊息已經 @ 了機器人（不論顯示名稱是不是「佐為」）
+    if source.get("type") in ["group", "room"]:
+        addressed_to_sai = True
+
     # Get target ID for game state management
     target_id = source.get("groupId") or source.get("roomId") or source.get("userId")
 
