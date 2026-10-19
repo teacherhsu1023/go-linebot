@@ -216,6 +216,7 @@ PORT=3000
 
 - 輸入「直播」列出正在進行的職業比賽直播
 - 輸入「直播 N」回覆「比賽名稱 黑-黑方 白-白方」，並附上第 N 場直播的當前盤面（最新一手有標記）
+- 列表快取期間棋局剛好下完時，「直播 N」會顯示終局盤面並附上結果（例如「白中盤勝」）
 - 資料來源以[弈客](https://home.yikeweiqi.com/#/live)為主，失敗時退回[星陣](https://www.19x19.com/engine/live/list)；兩者都是非官方 API，網站改版時需要調整 `handlers/live_handler.py`
 - 列表與棋譜都快取 5 分鐘（存在 GCS 的 `live/cache/`），避免頻繁打擾來源網站
 - 不經過 LINE 測試兩個來源：在 `gcp_linebot/` 執行 `python -m handlers.live_handler`

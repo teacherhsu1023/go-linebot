@@ -1912,8 +1912,8 @@ async def handle_live_command(
             return
 
         game = games[live_index - 1]
-        sgf_text = await live_handler.get_live_sgf(game)
-        sgf_game = sgf.Sgf_game.from_bytes(sgf_text.encode("utf-8"))
+        record = await live_handler.get_live_record(game)
+        sgf_game = sgf.Sgf_game.from_bytes(record["sgf"].encode("utf-8"))
         restored = restore_game_from_sgf_object(sgf_game)
         if not restored:
             await send_message(
@@ -1924,9 +1924,10 @@ async def handle_live_command(
         # 黑白方以棋譜的 PB / PW 為準
         black = sgf_game.get_player_name("b") or game["black"]
         white = sgf_game.get_player_name("w") or game["white"]
-        message_text = live_handler.to_traditional(
-            f"{game['name']} 黑-{black} 白-{white}"
-        )
+        message_text = f"{game['name']} 黑-{black} 白-{white}"
+        if record["result"]:
+            message_text += f"\n🏁 對局已結束：{record['result']}"
+        message_text = live_handler.to_traditional(message_text)
 
         last_coords = None
         for node in reversed(sgf_game.get_main_sequence()):

@@ -34,6 +34,7 @@ GCS_PREFIX = "live"
 YIKE_MAX_PAGES = 3
 
 YIKE_API_URL = "https://api.yikeweiqi.com"
+YIKE_NEW_API_URL = "https://api-new.yikeweiqi.com"
 YIKE_APP_KEY = "3396jtzhK57XhJom"
 YIKE_APP_SECRET = "hfdSXRKm0DQyLmNXmNCNkZpjy2o5q1Hk"
 YIKE_ACCESS_TOKEN_SALT = "@1%e$5*f@3"
@@ -154,6 +155,16 @@ async def _yike_get(client: httpx.AsyncClient, path: str, params: Dict[str, Any]
     return body["Result"]
 
 
+async def _yike_new_get(client: httpx.AsyncClient, path: str):
+    """api-new 的回應格式跟舊 API 不同：小寫欄位、成功時 status 為 0"""
+    response = await client.get(f"{YIKE_NEW_API_URL}{path}", headers=_yike_headers())
+    response.raise_for_status()
+    body = response.json()
+    if body.get("status") != 0:
+        raise RuntimeError(f"yike {path} failed: {body.get('status')} {body.get('message')}")
+    return body["result"]
+
+
 async def _fetch_yike_list(client: httpx.AsyncClient) -> List[Dict[str, Any]]:
     games = []
     for page in range(1, YIKE_MAX_PAGES + 1):
@@ -181,12 +192,19 @@ async def _fetch_yike_list(client: httpx.AsyncClient) -> List[Dict[str, Any]]:
     return games
 
 
-async def _fetch_yike_sgf(client: httpx.AsyncClient, game_id: str) -> str:
-    result = await _yike_get(client, "/v2/golive/dtl/", {"id": game_id})
-    sgf_text = (result.get("live") or {}).get("Content")
+async def _fetch_yike_record(client: httpx.AsyncClient, game_id: str) -> Dict[str, str]:
+    """單局棋譜與結果；新版 API 會附上結果（如「白中盘胜」），失敗時改用舊版"""
+    try:
+        result = await _yike_new_get(client, f"/v1/golives/{game_id}")
+        sgf_text, game_result = result.get("sgf"), result.get("game_result")
+    except Exception as error:
+        logger.warning(f"Failed to fetch yike game {game_id} from api-new: {error}")
+        result = await _yike_get(client, "/v2/golive/dtl/", {"id": game_id})
+        live = result.get("live") or {}
+        sgf_text, game_result = live.get("Content"), live.get("GameResult")
     if not sgf_text:
         raise RuntimeError(f"yike game {game_id} has no sgf")
-    return sgf_text
+    return {"sgf": sgf_text, "result": game_result or ""}
 
 
 # ============================================================================
@@ -247,9 +265,30 @@ def _xingzhen_to_sgf(live_match: Dict[str, Any], moves: str) -> str:
     return header + "".join(nodes) + ")"
 
 
-async def _fetch_xingzhen_sgf(client: httpx.AsyncClient, game_id: str) -> str:
+def _format_sgf_result(result: str) -> str:
+    """把 SGF 格式的結果（B+R、W+3.5、B+T）轉成中文"""
+    if "+" not in result:
+        return result
+    color, _, detail = result.partition("+")
+    winner = {"B": "黑", "W": "白"}.get(color.upper())
+    if not winner:
+        return result
+    if detail.upper() in ("R", "RESIGN"):
+        return f"{winner}中盤勝"
+    if detail.upper() in ("T", "TIME"):
+        return f"{winner}超時勝"
+    if detail:
+        return f"{winner}勝 {detail} 目"
+    return f"{winner}勝"
+
+
+async def _fetch_xingzhen_record(client: httpx.AsyncClient, game_id: str) -> Dict[str, str]:
     data = await _xingzhen_get(client, f"/situation/{game_id}", {"no_cache": 1})
-    return _xingzhen_to_sgf(data.get("liveMatch") or {}, data.get("moves") or "")
+    live_match = data.get("liveMatch") or {}
+    return {
+        "sgf": _xingzhen_to_sgf(live_match, data.get("moves") or ""),
+        "result": _format_sgf_result(live_match.get("gameResult") or ""),
+    }
 
 
 # ============================================================================
@@ -274,9 +313,12 @@ async def get_live_games() -> List[Dict[str, Any]]:
     return games
 
 
-async def get_live_sgf(game: Dict[str, Any]) -> str:
-    """取得某一局直播目前的 SGF"""
-    key = f"{game['source']}_{game['id']}"
+async def get_live_record(game: Dict[str, Any]) -> Dict[str, str]:
+    """取得某一局直播目前的棋譜：{"sgf": SGF 字串, "result": 結果，進行中為空字串}
+
+    列表快取 5 分鐘，這段期間內棋局可能剛好下完，所以這裡會帶上結果。
+    """
+    key = f"record_{game['source']}_{game['id']}"
     cached = await _load_cache(key)
     if cached:
         return cached["data"]
@@ -284,33 +326,34 @@ async def get_live_sgf(game: Dict[str, Any]) -> str:
     async with httpx.AsyncClient(timeout=HTTP_TIMEOUT_SECONDS) as client:
         if game["source"] == SOURCE_YIKE:
             try:
-                sgf_text = await _fetch_yike_sgf(client, game["id"])
+                record = await _fetch_yike_record(client, game["id"])
             except Exception as error:
                 # 星陣的 liveId 與弈客的棋局 Id 相同，可以直接拿來查
                 logger.warning(
                     f"Failed to fetch yike game {game['id']}, falling back to 19x19: {error}"
                 )
-                sgf_text = await _fetch_xingzhen_sgf(client, game["id"])
+                record = await _fetch_xingzhen_record(client, game["id"])
         else:
-            sgf_text = await _fetch_xingzhen_sgf(client, game["id"])
+            record = await _fetch_xingzhen_record(client, game["id"])
 
-    await _save_cache(key, sgf_text)
-    return sgf_text
+    await _save_cache(key, record)
+    return record
 
 
 if __name__ == "__main__":
     # 不經過 GCS 快取，直接測試兩個來源：python -m handlers.live_handler
     async def _main():
         async with httpx.AsyncClient(timeout=HTTP_TIMEOUT_SECONDS) as client:
-            for fetch_list, fetch_sgf in (
-                (_fetch_yike_list, _fetch_yike_sgf),
-                (_fetch_xingzhen_list, _fetch_xingzhen_sgf),
+            for fetch_list, fetch_record in (
+                (_fetch_yike_list, _fetch_yike_record),
+                (_fetch_xingzhen_list, _fetch_xingzhen_record),
             ):
                 games = await fetch_list(client)
                 print(f"== {fetch_list.__name__}: {len(games)} live games")
                 for i, g in enumerate(games, 1):
                     print(i, to_traditional(f"{g['name']} 黑-{g['black']} 白-{g['white']}"))
                 if games:
-                    print((await fetch_sgf(client, games[0]["id"]))[:200])
+                    record = await fetch_record(client, games[0]["id"])
+                    print(record["result"] or "進行中", record["sgf"][:200])
 
     asyncio.run(_main())
