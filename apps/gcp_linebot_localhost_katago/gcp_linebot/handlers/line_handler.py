@@ -28,6 +28,7 @@ from logger import logger
 from handlers.go_engine import GoBoard
 from handlers.board_visualizer import BoardVisualizer
 from handlers import sai_handler
+from handlers import live_handler
 
 # Initialize LINE Bot API v3
 configuration = Configuration(access_token=config["line"]["channel_access_token"])
@@ -445,6 +446,10 @@ HELP_MESSAGE = """歡迎使用圍棋 Line Bot！
 • 重置 / reset - 重置棋盤，開始新遊戲（會保存當前棋譜）
 • 投子 - 認輸並結束本局（會先顯示勝負，再重置棋盤）
 • 形勢 / 形式 / evaluation - 顯示當前盤面領地分布與目數差距
+
+📺 直播功能：
+• 直播 / live - 列出正在進行的職業比賽直播
+• 直播 3 / live 3 - 顯示第 3 場直播的當前盤面（約每 5 分鐘更新）
 
 🤖 AI 對弈功能：
 • 對弈 / vs - 查看目前對弈模式狀態
@@ -1878,6 +1883,106 @@ async def handle_load_game_by_id(
         await asyncio.to_thread(line_bot_api.reply_message, request)
 
 
+async def handle_live_command(
+    target_id: str, reply_token: Optional[str], live_index: Optional[int]
+):
+    """Handle 直播 / 直播 N - list live pro games, or show the current board of game N"""
+    try:
+        games = await live_handler.get_live_games()
+
+        if not games:
+            await send_message(
+                target_id, reply_token, [TextMessage(text="目前沒有正在進行的直播。")]
+            )
+            return
+
+        if live_index is None or not 1 <= live_index <= len(games):
+            # 列表欄位的黑白方偶爾跟實際棋譜相反，這裡不標顏色
+            lines = [
+                f"{i}. {game['name']} {game['black']} vs {game['white']}"
+                for i, game in enumerate(games, 1)
+            ]
+            header = "📺 正在進行的直播："
+            if live_index is not None:
+                header = f"目前只有 {len(games)} 場直播，請輸入 1~{len(games)}。\n\n{header}"
+            message_text = live_handler.to_traditional(
+                header + "\n" + "\n".join(lines) + "\n\n輸入「直播 N」查看第 N 場的盤面"
+            )
+            await send_message(target_id, reply_token, [TextMessage(text=message_text)])
+            return
+
+        game = games[live_index - 1]
+        sgf_text = await live_handler.get_live_sgf(game)
+        sgf_game = sgf.Sgf_game.from_bytes(sgf_text.encode("utf-8"))
+        restored = restore_game_from_sgf_object(sgf_game)
+        if not restored:
+            await send_message(
+                target_id, reply_token, [TextMessage(text="直播棋譜解析失敗，請稍後再試。")]
+            )
+            return
+
+        # 黑白方以棋譜的 PB / PW 為準
+        black = sgf_game.get_player_name("b") or game["black"]
+        white = sgf_game.get_player_name("w") or game["white"]
+        message_text = live_handler.to_traditional(
+            f"{game['name']} 黑-{black} 白-{white}"
+        )
+
+        last_coords = None
+        for node in reversed(sgf_game.get_main_sequence()):
+            color, move = node.get_move()
+            if move is not None:
+                sgf_r, sgf_c = move
+                last_coords = (18 - sgf_r, sgf_c)
+                break
+
+        import tempfile
+        from services.storage import file_exists, upload_file, get_public_url
+
+        # 檔名帶手數：同一盤面不重畫，盤面變了網址也會跟著變，LINE 不會拿到舊圖
+        move_count = sum(1 for node in sgf_game.get_main_sequence() if node.get_move()[0])
+        remote_path = f"live/{game['source']}_{game['id']}/board_{move_count}.png"
+
+        if not await file_exists(remote_path):
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_file:
+                tmp_path = tmp_file.name
+            try:
+                visualizer.draw_board(
+                    restored["game"].board, last_move=last_coords, output_filename=tmp_path
+                )
+                await upload_file(tmp_path, remote_path)
+            finally:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+
+        image_url = get_public_url(remote_path)
+        if not is_valid_https_url(image_url):
+            await send_message(
+                target_id, reply_token, [TextMessage(text=f"{message_text}\n\n⚠️ 圖片 URL 無效")]
+            )
+            return
+
+        request = ReplyMessageRequest(
+            reply_token=reply_token,
+            messages=[
+                TextMessage(text=message_text),
+                ImageMessage(
+                    original_content_url=image_url,
+                    preview_image_url=image_url,
+                ),
+            ],
+        )
+        await asyncio.to_thread(line_bot_api.reply_message, request)
+
+    except Exception as error:
+        logger.error(f"Error handling live command: {error}", exc_info=True)
+        await send_message(
+            target_id, reply_token, [TextMessage(text="直播資料取得失敗，請稍後再試。")]
+        )
+
+
 async def handle_text_message(event: Dict[str, Any]):
     """Handle text message"""
     reply_token = event.get("replyToken")
@@ -1984,6 +2089,12 @@ async def handle_text_message(event: Dict[str, Any]):
     if undo_match:
         undo_steps = int(undo_match.group(1)) if undo_match.group(1) else 1
         await handle_undo_move(target_id, reply_token, undo_steps=undo_steps)
+        return
+
+    live_match = re.match(r"^(?:直播|live)(?:\s*(\d+))?$", text, re.IGNORECASE)
+    if live_match:
+        live_index = int(live_match.group(1)) if live_match.group(1) else None
+        await handle_live_command(target_id, reply_token, live_index)
         return
 
     if "讀取" in text or "load" in text.lower():

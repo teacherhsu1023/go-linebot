@@ -212,6 +212,14 @@ PORT=3000
 - 信心門檻、含糊帶過的台詞等設定集中在 `handlers/sai_handler.py` 最上方
 - 需要環境變數 `TYPESAFE_API_KEY`
 
+### 直播功能
+
+- 輸入「直播」列出正在進行的職業比賽直播
+- 輸入「直播 N」回覆「比賽名稱 黑-黑方 白-白方」，並附上第 N 場直播的當前盤面（最新一手有標記）
+- 資料來源以[弈客](https://home.yikeweiqi.com/#/live)為主，失敗時退回[星陣](https://www.19x19.com/engine/live/list)；兩者都是非官方 API，網站改版時需要調整 `handlers/live_handler.py`
+- 列表與棋譜都快取 5 分鐘（存在 GCS 的 `live/cache/`），避免頻繁打擾來源網站
+- 不經過 LINE 測試兩個來源：在 `gcp_linebot/` 執行 `python -m handlers.live_handler`
+
 ### 形勢判斷功能
 
 形勢判斷功能對當前盤面進行 KataGo 評估，顯示領地分布與目數差距。
@@ -311,6 +319,7 @@ gcp_linebot_localhost_katago/
 │   ├── config.py                   # 設定檔
 │   ├── handlers/                   # 處理器
 │   │   ├── line_handler.py         # LINE Bot 處理
+│   │   ├── live_handler.py         # 直播棋譜抓取
 │   │   ├── sgf_handler.py          # SGF 解析
 │   │   ├── draw_handler.py         # GIF 生成
 │   │   └── board_visualizer.py     # 棋盤視覺化
