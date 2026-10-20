@@ -1925,8 +1925,13 @@ async def handle_live_command(
         black = sgf_game.get_player_name("b") or game["black"]
         white = sgf_game.get_player_name("w") or game["white"]
         message_text = f"{game['name']} 黑-{black} 白-{white}"
+        move_count = sum(1 for node in sgf_game.get_main_sequence() if node.get_move()[0])
         if record["result"]:
             message_text += f"\n🏁 對局已結束：{record['result']}"
+        else:
+            ai_line = live_handler.format_ai_line(game.get("ai"), move_count)
+            if ai_line:
+                message_text += f"\n{ai_line}"
         message_text = live_handler.to_traditional(message_text)
 
         last_coords = None
@@ -1941,7 +1946,6 @@ async def handle_live_command(
         from services.storage import file_exists, upload_file, get_public_url
 
         # 檔名帶手數：同一盤面不重畫，盤面變了網址也會跟著變，LINE 不會拿到舊圖
-        move_count = sum(1 for node in sgf_game.get_main_sequence() if node.get_move()[0])
         remote_path = f"live/{game['source']}_{game['id']}/board_{move_count}.png"
 
         if not await file_exists(remote_path):

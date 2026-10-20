@@ -165,6 +165,20 @@ async def _yike_new_get(client: httpx.AsyncClient, path: str):
     return body["result"]
 
 
+def _yike_ai(game: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """列表裡的即時 AI 分析：BlackWinRate 為黑勝率（%）、Delta 為黑領先目數、RateHandsCount 為分析到第幾手"""
+    if not game.get("RealtimeAnalysisFlag"):
+        return None
+    try:
+        return {
+            "black_win_rate": float(game["BlackWinRate"]),
+            "black_lead": float(game["Delta"]) if game.get("Delta") not in (None, "") else None,
+            "move": int(game["RateHandsCount"]),
+        }
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 async def _fetch_yike_list(client: httpx.AsyncClient) -> List[Dict[str, Any]]:
     games = []
     for page in range(1, YIKE_MAX_PAGES + 1):
@@ -183,6 +197,7 @@ async def _fetch_yike_list(client: httpx.AsyncClient) -> List[Dict[str, Any]]:
                 "black": g.get("BlackName", ""),
                 "white": g.get("WhiteName", ""),
                 "move_count": g.get("HandsCount", 0),
+                "ai": _yike_ai(g),
             }
             for g in live_games
         )
@@ -223,6 +238,20 @@ async def _xingzhen_get(client: httpx.AsyncClient, path: str, params=None):
     return body["data"]
 
 
+def _xingzhen_ai(live_match: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """星陣的 winrate 是黑勝率（0~1），對應目前的手數；沒有目差"""
+    if live_match.get("winrate") is None:
+        return None
+    try:
+        return {
+            "black_win_rate": float(live_match["winrate"]) * 100,
+            "black_lead": None,
+            "move": int(live_match.get("moveNum") or 0),
+        }
+    except (TypeError, ValueError):
+        return None
+
+
 async def _fetch_xingzhen_list(client: httpx.AsyncClient) -> List[Dict[str, Any]]:
     data = await _xingzhen_get(client, "/all")
     return [
@@ -233,6 +262,7 @@ async def _fetch_xingzhen_list(client: httpx.AsyncClient) -> List[Dict[str, Any]
             "black": m.get("pb", ""),
             "white": m.get("pw", ""),
             "move_count": m.get("moveNum", 0),
+            "ai": _xingzhen_ai(m),
         }
         for m in (item.get("liveMatch") or {} for item in data)
         if m.get("liveId") and not m.get("gameResult")
@@ -294,6 +324,27 @@ async def _fetch_xingzhen_record(client: httpx.AsyncClient, game_id: str) -> Dic
 # ============================================================================
 # 對外介面
 # ============================================================================
+
+
+def format_ai_line(ai: Optional[Dict[str, Any]], current_move: int) -> Optional[str]:
+    """例如「📊 AI（2 手之前）：黑勝率 65.8%，黑領先 2.4 目」
+
+    列表與棋譜分開快取，勝率可能比盤面晚幾手；棋盤上沒有手數，所以寫「n 手之前」。
+    """
+    if not ai:
+        return None
+    moves_behind = current_move - ai["move"]
+    when = "當前手數" if moves_behind <= 0 else f"{moves_behind} 手之前"
+    text = f"📊 AI（{when}）：黑勝率 {ai['black_win_rate']:.1f}%"
+    lead = ai.get("black_lead")
+    if lead is not None:
+        if lead > 0:
+            text += f"，黑領先 {lead:g} 目"
+        elif lead < 0:
+            text += f"，白領先 {-lead:g} 目"
+        else:
+            text += "，雙方目數相當"
+    return text
 
 
 async def get_live_games() -> List[Dict[str, Any]]:
