@@ -179,8 +179,47 @@ def _yike_ai(game: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         return None
 
 
+def _yike_same_game_key(game: Dict[str, Any]):
+    """同一盤棋的判斷依據：雙方棋手（不分黑白）＋對局日期"""
+    players = frozenset(
+        str(game.get(id_key) or game.get(name_key, ""))
+        for id_key, name_key in (("BlackPlayer", "BlackName"), ("WhitePlayer", "WhiteName"))
+    )
+    return players, game.get("GameDate", "")
+
+
+def _merge_yike_duplicates(live_games: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """熱門對局弈客會另開一個置頂直播間（TopFlag=1，資料來自新浪），跟一般直播間是同一盤棋，
+    但人氣、AI 分析各自計算，置頂間開得晚，AI 勝率有時還沒出來。這裡合併成一筆：
+    - 位置：同一組中最前面的那筆（置頂的排最前面）
+    - 棋譜：優先用一般直播間（有官方直播員、開得早）
+    - 名稱：取最短的（一般直播間的名稱會再加上「黑 VS 白」）
+    - AI：取有勝率且分析到最新手數的那份
+    """
+    groups: Dict[Any, List[Dict[str, Any]]] = {}
+    for game in live_games:
+        groups.setdefault(_yike_same_game_key(game), []).append(game)
+
+    merged = []
+    for group in groups.values():
+        record_game = min(group, key=lambda g: (bool(g.get("TopFlag")), g["Id"]))
+        ais = [ai for ai in map(_yike_ai, group) if ai]
+        merged.append(
+            {
+                "source": SOURCE_YIKE,
+                "id": str(record_game["Id"]),
+                "name": min((g.get("GameName", "") for g in group), key=len),
+                "black": record_game.get("BlackName", ""),
+                "white": record_game.get("WhiteName", ""),
+                "move_count": max(g.get("HandsCount", 0) for g in group),
+                "ai": max(ais, key=lambda ai: ai["move"]) if ais else None,
+            }
+        )
+    return merged
+
+
 async def _fetch_yike_list(client: httpx.AsyncClient) -> List[Dict[str, Any]]:
-    games = []
+    live_games = []
     for page in range(1, YIKE_MAX_PAGES + 1):
         result = await _yike_get(
             client,
@@ -188,23 +227,12 @@ async def _fetch_yike_list(client: httpx.AsyncClient) -> List[Dict[str, Any]]:
             {"p": page, "since": 0, "official": 1, "version": 2, "usertoken": -1},
         )
         page_games = result.get("list") or []
-        live_games = [g for g in page_games if g.get("Status") == YIKE_STATUS_LIVE]
-        games.extend(
-            {
-                "source": SOURCE_YIKE,
-                "id": str(g["Id"]),
-                "name": g.get("GameName", ""),
-                "black": g.get("BlackName", ""),
-                "white": g.get("WhiteName", ""),
-                "move_count": g.get("HandsCount", 0),
-                "ai": _yike_ai(g),
-            }
-            for g in live_games
-        )
+        page_live = [g for g in page_games if g.get("Status") == YIKE_STATUS_LIVE]
+        live_games.extend(page_live)
         # 進行中的排在最前面，這頁出現已結束的棋局就不用再翻下一頁
-        if len(live_games) < len(page_games) or not page_games:
+        if len(page_live) < len(page_games) or not page_games:
             break
-    return games
+    return _merge_yike_duplicates(live_games)
 
 
 async def _fetch_yike_record(client: httpx.AsyncClient, game_id: str) -> Dict[str, str]:
