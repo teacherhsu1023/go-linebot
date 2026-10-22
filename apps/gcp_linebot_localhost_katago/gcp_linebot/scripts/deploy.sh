@@ -43,7 +43,7 @@ echo ""
 # 建構映像檔（在應用程式目錄下執行，使用 .dockerignore）
 echo "🚀 開始建構映像檔..."
 cd "$APP_DIR"
-if ! gcloud builds submit --tag "$IMAGE_NAME" --project "$PROJECT_ID"; then
+if ! gcloud builds submit --config cloudbuild.yaml --substitutions "_IMAGE=$IMAGE_NAME" --project "$PROJECT_ID"; then
     echo "❌ 映像檔建構失敗"
     exit 1
 fi
