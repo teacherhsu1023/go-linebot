@@ -448,7 +448,7 @@ HELP_MESSAGE = """歡迎使用圍棋 Line Bot！
 • 形勢 / 形式 / evaluation - 顯示當前盤面領地分布與目數差距
 
 📺 直播功能：
-• 直播 / live - 列出正在進行的職業比賽直播
+• 直播 / live - 列出正在進行的職業比賽直播，以及接下來三天的棋戰預定
 • 直播 3 / live 3 - 顯示第 3 場直播的當前盤面（約每 5 分鐘更新）
 
 🤖 AI 對弈功能：
@@ -1883,6 +1883,16 @@ async def handle_load_game_by_id(
         await asyncio.to_thread(line_bot_api.reply_message, request)
 
 
+async def append_schedule(message_text: str) -> str:
+    """在直播列表後面接上接下來幾天的棋戰預定（抓不到就只回直播列表）"""
+    try:
+        schedule_text = await live_handler.get_schedule_text()
+    except Exception as error:
+        logger.warning(f"Failed to get go schedule: {error}")
+        return message_text
+    return f"{message_text}\n\n{schedule_text}" if schedule_text else message_text
+
+
 async def handle_live_command(
     target_id: str, reply_token: Optional[str], live_index: Optional[int]
 ):
@@ -1891,9 +1901,8 @@ async def handle_live_command(
         games = await live_handler.get_live_games()
 
         if not games:
-            await send_message(
-                target_id, reply_token, [TextMessage(text="目前沒有正在進行的直播。")]
-            )
+            message_text = await append_schedule("目前沒有正在進行的直播。")
+            await send_message(target_id, reply_token, [TextMessage(text=message_text)])
             return
 
         if live_index is None or not 1 <= live_index <= len(games):
@@ -1908,6 +1917,7 @@ async def handle_live_command(
             message_text = live_handler.to_traditional(
                 header + "\n" + "\n".join(lines) + "\n\n輸入「直播 N」查看第 N 場的盤面"
             )
+            message_text = await append_schedule(message_text)
             await send_message(target_id, reply_token, [TextMessage(text=message_text)])
             return
 

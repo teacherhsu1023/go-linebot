@@ -4,14 +4,18 @@
 簽法來自弈客網頁前端的 JS；弈客失敗時退回星陣（19x19.com），星陣轉播的其實是
 弈客的部分棋局，不需要簽章。兩者都是非官方 API，對方改版時可能需要重新調整。
 
-為了不對來源網站造成負擔，列表與每局棋譜都快取 CACHE_TTL_SECONDS 秒，
-快取存在 GCS（Cloud Run 多個 instance 共用），記憶體再多一層。
+棋戰預定取自弈棋（yigo.org）首頁嵌入的 Google 日曆，接在直播列表後面。
+
+為了不對來源網站造成負擔，列表與每局棋譜都快取 CACHE_TTL_SECONDS 秒、棋戰預定快取
+SCHEDULE_CACHE_TTL_SECONDS 秒，快取存在 GCS（Cloud Run 多個 instance 共用），記憶體再多一層。
 """
 
 import asyncio
+import datetime
 import hashlib
 import json
 import random
+import re
 import time
 from typing import Any, Dict, List, Optional
 
@@ -46,6 +50,22 @@ XINGZHEN_API_URL = "https://api.19x19.com/api/engine/golives"
 SOURCE_YIKE = "yike"
 SOURCE_XINGZHEN = "19x19"
 
+# 棋戰預定：弈棋首頁「棋戰預定」欄位嵌入的 Google 公開日曆（依顯示順序）
+SCHEDULE_CALENDARS = [
+    ("台灣", "282p5pbvkd24rs22pva8p6datk@group.calendar.google.com"),
+    ("中國", "4ukicnhe56g4sp1alg4fjo0hnc@group.calendar.google.com"),
+    ("日本", "nvuf5nq1qmcsbop92895u142u4@group.calendar.google.com"),
+    ("韓國", "a73c9vd6p2ofb03n118a3a49o0@group.calendar.google.com"),
+    ("國際", "nc7e6730no5n0ma1sem39p6o68@group.calendar.google.com"),
+]
+SCHEDULE_ICS_URL = "https://calendar.google.com/calendar/ical/{calendar_id}/public/basic.ics"
+SCHEDULE_DAYS = 3  # 含今天
+# 日曆檔每個都有數百 KB 到 2MB，內容也不常變，快取久一點
+SCHEDULE_CACHE_TTL_SECONDS = 6 * 60 * 60
+SCHEDULE_HTTP_TIMEOUT_SECONDS = 30.0
+TAIPEI_TZ = datetime.timezone(datetime.timedelta(hours=8))  # 台灣沒有日光節約時間
+WEEKDAYS = "一二三四五六日"
+
 HTTP_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -74,13 +94,13 @@ def to_traditional(text: str) -> str:
 _memory_cache: Dict[str, Dict[str, Any]] = {}
 
 
-def _is_fresh(entry: Optional[Dict[str, Any]]) -> bool:
-    return bool(entry) and time.time() - entry.get("fetched_at", 0) < CACHE_TTL_SECONDS
+def _is_fresh(entry: Optional[Dict[str, Any]], ttl: float) -> bool:
+    return bool(entry) and time.time() - entry.get("fetched_at", 0) < ttl
 
 
-async def _load_cache(key: str) -> Optional[Dict[str, Any]]:
+async def _load_cache(key: str, ttl: float = CACHE_TTL_SECONDS) -> Optional[Dict[str, Any]]:
     entry = _memory_cache.get(key)
-    if _is_fresh(entry):
+    if _is_fresh(entry, ttl):
         return entry
 
     from services.storage import download_file_as_text, file_exists
@@ -89,7 +109,7 @@ async def _load_cache(key: str) -> Optional[Dict[str, Any]]:
     try:
         if await file_exists(remote_path):
             entry = json.loads(await download_file_as_text(remote_path))
-            if _is_fresh(entry):
+            if _is_fresh(entry, ttl):
                 _memory_cache[key] = entry
                 return entry
     except Exception as error:
@@ -350,6 +370,75 @@ async def _fetch_xingzhen_record(client: httpx.AsyncClient, game_id: str) -> Dic
 
 
 # ============================================================================
+# 棋戰預定（Google 日曆）
+# ============================================================================
+
+
+def _unescape_ics(text: str) -> str:
+    return re.sub(r"\\([\\,;nN])", lambda m: "\n" if m.group(1) in "nN" else m.group(1), text)
+
+
+def _parse_ics_date(name: str, value: str) -> Optional[datetime.date]:
+    """全天活動是 DTSTART;VALUE=DATE:20261023，少數有時間的活動是 UTC 時間，換成台灣日期"""
+    try:
+        if "VALUE=DATE" in name or len(value) == 8:
+            return datetime.datetime.strptime(value[:8], "%Y%m%d").date()
+        moment = datetime.datetime.strptime(value.rstrip("Z"), "%Y%m%dT%H%M%S")
+        if value.endswith("Z"):
+            moment = moment.replace(tzinfo=datetime.timezone.utc).astimezone(TAIPEI_TZ)
+        return moment.date()
+    except ValueError:
+        return None
+
+
+def _parse_ics_events(ics_text: str):
+    """回傳 (摘要, 開始日期, 結束日期(含)) 。地點（LOCATION）不需要，直接略過；
+    日曆裡的重複性活動（RRULE）都在多年前結束，只取第一次"""
+    text = re.sub(r"\r?\n[ \t]", "", ics_text.replace("\r\n", "\n"))
+    for block in re.findall(r"BEGIN:VEVENT\n(.*?)END:VEVENT", text, re.S):
+        fields = {}
+        for line in block.split("\n"):
+            name, sep, value = line.partition(":")
+            if sep:
+                fields.setdefault(name.split(";")[0], (name, value))
+        if "SUMMARY" not in fields or "DTSTART" not in fields:
+            continue
+        start = _parse_ics_date(*fields["DTSTART"])
+        if not start:
+            continue
+        end = _parse_ics_date(*fields["DTEND"]) if "DTEND" in fields else None
+        if end and "VALUE=DATE" in fields["DTEND"][0]:
+            end -= datetime.timedelta(days=1)  # 全天活動的 DTEND 是隔天（不含）
+        yield _unescape_ics(fields["SUMMARY"][1]).strip(), start, max(end or start, start)
+
+
+async def _fetch_schedule(today: datetime.date) -> List[Dict[str, Any]]:
+    """接下來 SCHEDULE_DAYS 天（含今天）每天的棋戰；跨日的棋戰每天都會列出"""
+    days = [today + datetime.timedelta(days=i) for i in range(SCHEDULE_DAYS)]
+    events_by_day: Dict[datetime.date, List[str]] = {day: [] for day in days}
+
+    async with httpx.AsyncClient(timeout=SCHEDULE_HTTP_TIMEOUT_SECONDS) as client:
+        responses = await asyncio.gather(
+            *(
+                client.get(SCHEDULE_ICS_URL.format(calendar_id=calendar_id), headers=HTTP_HEADERS)
+                for _, calendar_id in SCHEDULE_CALENDARS
+            ),
+            return_exceptions=True,
+        )
+
+    for (region, _), response in zip(SCHEDULE_CALENDARS, responses):
+        if isinstance(response, Exception) or response.status_code != 200:
+            logger.warning(f"Failed to fetch {region} schedule calendar: {response}")
+            continue
+        for summary, start, end in _parse_ics_events(response.text):
+            for day in days:
+                if start <= day <= end and f"[{region}] {summary}" not in events_by_day[day]:
+                    events_by_day[day].append(f"[{region}] {summary}")
+
+    return [{"date": day.isoformat(), "events": events_by_day[day]} for day in days]
+
+
+# ============================================================================
 # 對外介面
 # ============================================================================
 
@@ -390,6 +479,27 @@ async def get_live_games() -> List[Dict[str, Any]]:
 
     await _save_cache("list", games)
     return games
+
+
+async def get_schedule_text() -> Optional[str]:
+    """棋戰預定的文字，接在直播列表後面；抓不到時回傳 None"""
+    today = datetime.datetime.now(TAIPEI_TZ).date()
+    key = f"schedule_{today:%Y%m%d}"
+    cached = await _load_cache(key, SCHEDULE_CACHE_TTL_SECONDS)
+    if cached:
+        schedule = cached["data"]
+    else:
+        schedule = await _fetch_schedule(today)
+        if not any(day["events"] for day in schedule):
+            return None
+        await _save_cache(key, schedule)
+
+    lines = ["📅 棋戰預定："]
+    for day in schedule:
+        date = datetime.date.fromisoformat(day["date"])
+        lines.append(f"\n{date.month}/{date.day}（{WEEKDAYS[date.weekday()]}）")
+        lines.extend(f"• {event}" for event in day["events"] or ["無"])
+    return "\n".join(lines)
 
 
 async def get_live_record(game: Dict[str, Any]) -> Dict[str, str]:
