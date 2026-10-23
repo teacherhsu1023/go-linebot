@@ -1906,7 +1906,7 @@ async def handle_live_command(
             return
 
         if live_index is None or not 1 <= live_index <= len(games):
-            # 列表欄位的黑白方偶爾跟實際棋譜相反，這裡不標顏色
+            # 列表只列對局者，黑白方在「直播 N」顯示
             lines = [
                 f"{i}. {game['name']} {game['black']} vs {game['white']}"
                 for i, game in enumerate(games, 1)
@@ -1931,9 +1931,10 @@ async def handle_live_command(
             )
             return
 
-        # 黑白方以棋譜的 PB / PW 為準
-        black = sgf_game.get_player_name("b") or game["black"]
-        white = sgf_game.get_player_name("w") or game["white"]
+        # 黑白方以列表欄位為準：弈客 SGF 標頭的 PB / PW 有時是反的（猜先前就先填好、
+        # 之後沒更新），列表的 BlackName / WhiteName 才是直播員修正過的，星陣最後也會改成跟它一致
+        black = game["black"] or sgf_game.get_player_name("b")
+        white = game["white"] or sgf_game.get_player_name("w")
         message_text = f"{game['name']} 黑-{black} 白-{white}"
         move_count = sum(1 for node in sgf_game.get_main_sequence() if node.get_move()[0])
         if record["result"]:
